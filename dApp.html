@@ -51,10 +51,15 @@
         <div style="margin-top: 15px;">
             <button onclick="checkBalance()">Check Balance</button>
         </div>
+
+        <div>
+            <h3>Check Balance (โดยไม่ต้องต่อ MetaMask)</h3>
+            <input type="text" id="checkAddressInput" placeholder="กรอก Wallet Address (0x...)">
+            <button onclick="checkBalanceByAddress()">Check Balance</button>
+        </div>
     </div>
 
-    <script>
-        // ระบุ Contract Address และ ABI ที่ได้จากการ Deploy
+     <script>
         const contractAddress = "0x08f52fad7bC667b97d2145A4282DFCF36ce748A7";
         const contractABI = [
             "function deposit() public payable",
@@ -64,26 +69,44 @@
             "event Withdraw(address indexed owner, uint amount)"
         ];
 
-        let provider;
+        // 🔑 ใส่ Infura API Key ของคุณที่นี่ (เช่น Sepolia, Goerli หรือ Mainnet)
+        const INFURA_API_KEY = "YOUR_INFURA_API_KEY";
+        const INFURA_RPC_URL = `https://sepolia.infura.io/v3/${INFURA_API_KEY}`;
+
+        let readOnlyProvider;
+        let web3Provider;
         let signer;
-        let bankContract;
+        let bankContractRead;
+        let bankContractWrite;
+        let userAccount;
+
+        // เริ่มต้นสร้าง Provider จาก Infura ทันทีที่โหลดหน้าเว็บ
+        window.addEventListener('load', () => {
+            initInfura();
+        });
+
+        function initInfura() {
+            // สร้าง Provider สำหรับอ่านข้อมูลผ่าน Infura
+            readOnlyProvider = new ethers.providers.JsonRpcProvider(INFURA_RPC_URL);
+            bankContractRead = new ethers.Contract(contractAddress, contractABI, readOnlyProvider);
+            console.log("Connected to Infura Provider");
+        }
 
         // 1. เชื่อมต่อ MetaMask[cite: 1]
         async function connectMetaMask() {
             if (typeof window.ethereum !== 'undefined') {
                 try {
                     await window.ethereum.request({ method: 'eth_requestAccounts' });
-                    provider = new ethers.providers.Web3Provider(window.ethereum);
-                    signer = provider.getSigner();
+                    web3Provider = new ethers.providers.Web3Provider(window.ethereum);
+                    signer = web3Provider.getSigner();
                     
-                    const account = await signer.getAddress();
-                    document.getElementById('account').innerText = account;
+                    userAccount = await signer.getAddress();
+                    document.getElementById('account').innerText = userAccount;
                     document.getElementById('connectBtn').innerText = "Connected";
 
-                    // เชื่อมต่อ Smart Contract[cite: 1]
-                    bankContract = new ethers.Contract(contractAddress, contractABI, signer);
+                    // สร้าง Contract Instance สำหรับส่ง Transaction (Write)[cite: 1]
+                    bankContractWrite = new ethers.Contract(contractAddress, contractABI, signer);
                     
-                    // ดึงยอดเงินทันทีหลังจากเชื่อมต่อ
                     checkBalance();
                 } catch (error) {
                     console.error("User denied account access", error);
@@ -93,17 +116,33 @@
             }
         }
 
-        // 2. Deposit ETH[cite: 1]
+        // 2. Check Balance (ใช้ Infura อ่านค่าหากยังไม่ต่อ MetaMask)[cite: 1]
+        async function checkBalance() {
+            if (!userAccount) {
+                return alert("กรุณาเชื่อมต่อ MetaMask เพื่อระบุ Address ที่ต้องการเช็คยอดเงิน");
+            }
+            try {
+                // เรียกใช้ Read-only contract ที่สร้างจาก Infura Provider
+                const balanceWei = await bankContractRead.checkBlance({ from: userAccount });
+                const balanceEth = ethers.utils.formatEther(balanceWei);
+                document.getElementById('balance').innerText = balanceEth;
+            } catch (error) {
+                console.error(error);
+                alert("ไม่สามารถเช็คยอดเงินได้: " + error.message);
+            }
+        }
+
+        // 3. Deposit ETH (ใช้ Signer จาก MetaMask)[cite: 1]
         async function deposit() {
-            if (!bankContract) return alert("กรุณาเชื่อมต่อ MetaMask ก่อน");
+            if (!bankContractWrite) return alert("กรุณาเชื่อมต่อ MetaMask ก่อน");
             const amount = document.getElementById('depositAmount').value;
             if (!amount || amount <= 0) return alert("กรุณาระบุจำนวนเงิน");
 
             try {
-                const tx = await bankContract.deposit({
+                const tx = await bankContractWrite.deposit({
                     value: ethers.utils.parseEther(amount)
                 });
-                await tx.wait(); // รอ Transaction สำเร็จ
+                await tx.wait();
                 alert("Deposit สำเร็จ!");
                 checkBalance();
             } catch (error) {
@@ -112,17 +151,16 @@
             }
         }
 
-        // 3. Withdraw ETH[cite: 1]
+        // 4. Withdraw ETH (ใช้ Signer จาก MetaMask)[cite: 1]
         async function withdraw() {
-            if (!bankContract) return alert("กรุณาเชื่อมต่อ MetaMask ก่อน");
+            if (!bankContractWrite) return alert("กรุณาเชื่อมต่อ MetaMask ก่อน");
             const amount = document.getElementById('withdrawAmount').value;
             if (!amount || amount <= 0) return alert("กรุณาระบุจำนวนเงิน");
 
             try {
-                // แปลง ETH เป็น Wei ก่อนส่งไปยัง Smart Contract
                 const amountInWei = ethers.utils.parseEther(amount);
-                const tx = await bankContract.withdraw(amountInWei);
-                await tx.wait(); // รอ Transaction สำเร็จ
+                const tx = await bankContractWrite.withdraw(amountInWei);
+                await tx.wait();
                 alert("Withdraw สำเร็จ!");
                 checkBalance();
             } catch (error) {
@@ -131,16 +169,26 @@
             }
         }
 
-        // 4. Check Balance[cite: 1]
-        async function checkBalance() {
-            if (!bankContract) return alert("กรุณาเชื่อมต่อ MetaMask ก่อน");
+        async function checkBalanceByAddress() {
+            const inputAddr = document.getElementById('checkAddressInput').value.trim();
+            
+            // ถ้าไม่ได้กรอก Address และยังไม่ได้ต่อ MetaMask ให้แจ้งเตือน
+            const targetAddress = inputAddr || userAccount;
+            
+            if (!targetAddress) {
+                return alert("กรุณากรอก Wallet Address ที่ต้องการเช็ค หรือกด Connect MetaMask ก่อนครับ");
+            }
+
             try {
-                const balanceWei = await bankContract.checkBlance();
+                // ส่งค่า { from: targetAddress } เพื่อให้ Smart Contract รู้ว่ากำลังเช็คยอดของ Address ไหน
+                const balanceWei = await bankContractRead.checkBlance({ from: targetAddress });
                 const balanceEth = ethers.utils.formatEther(balanceWei);
+                
                 document.getElementById('balance').innerText = balanceEth;
+                alert(`ยอดเงินของ ${targetAddress.substring(0,6)}... คือ ${balanceEth} ETH`);
             } catch (error) {
                 console.error(error);
-                alert("ไม่สามารถเช็คยอดเงินได้");
+                alert("เกิดข้อผิดพลาดในการเช็คยอดเงิน: " + error.message);
             }
         }
     </script>
